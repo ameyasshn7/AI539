@@ -40,19 +40,21 @@ def main():
 
     # Build the model and put it on the GPU
     logging.info("Building model")
-    model = ParityLSTM()
-    model.to(dev) # move to GPU if cuda is enabled
+    hidden_dims = [16,12,10,8,4,2]
+    for i in hidden_dims:
+        model = ParityLSTM(1,i,2)
+        model.to(dev) # move to GPU if cuda is enabled
 
 
-    logging.info("Training model")
-    maximum_training_sequence_length = 5
-    train = Parity(split='train', max_length=maximum_training_sequence_length)
-    train_loader = DataLoader(train, batch_size=100, shuffle=True, collate_fn=pad_collate)
-    train_model(model, train_loader)
+        logging.info("Training model")
+        maximum_training_sequence_length = 5
+        train = Parity(split='train', max_length=maximum_training_sequence_length)
+        train_loader = DataLoader(train, batch_size=100, shuffle=True, collate_fn=pad_collate)
+        train_model(model, train_loader)
 
 
-    logging.info("Running generalization experiment")
-    runParityExperiment(model,maximum_training_sequence_length)
+        logging.info("Running generalization experiment")
+        runParityExperiment(model,maximum_training_sequence_length)
 
 
 
@@ -68,7 +70,7 @@ class ParityLSTM(torch.nn.Module) :
     # __init__ builds the internal components of the model (presumably an LSTM and linear layer for classification)
     # The LSTM should have hidden dimension equal to hidden_dim
 
-    def __init__(self,input_dim = 1, hidden_dim=16, output_dim = 2) :
+    def __init__(self,input_dim = 1, hidden_dim = 16, output_dim = 2) :
         super(ParityLSTM, self).__init__()
         self.hidden_dim = hidden_dim
         self.lstm = nn.LSTM(input_dim, self.hidden_dim, batch_first=True)
@@ -124,7 +126,7 @@ def runParityExperiment(model, max_train_length):
 
         logging.info("length=%d val accuracy %.3f" % (k, val_acc))
         
-    plotting(lengths, accuracy, max_train_length, 'LSTM')
+    plotting(lengths, accuracy, max_train_length, 'LSTM' )
 
     # plt.plot(lengths, accuracy, c="b")
     # plt.axvline(x=max_train_length, c="k", linestyle="dashed")
