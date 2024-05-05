@@ -1,42 +1,39 @@
-import matplotlib
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchtext.data.utils import get_tokenizer
+from torchtext.vocab import build_vocab_from_iterator
 from torch.utils.data import DataLoader
-from torchtext import datasets
-from torch.utils.data.backward_compatibility import worker_init_fn
-# from torch.utils.data.datapipes.utils.common import DILL_AVAILABLE
+from torchtext.datasets import UDPOS
+from torch.nn.utils.rnn import pad_sequence
+from collections import Counter
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import torchtext
+import portalocker
 
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-#Create data pipline
+train_data, test_data, val_data = UDPOS()
 
-train_data = datasets.UDPOS(split='train')
+tokenizer = get_tokenizer('basic_english')
 
-#combine data elements from a batch
+def yield_tokens(data_iter):
+    for _, tags, text in data_iter:
+        if isinstance(text, list):
+            # If the text is already a list of tokens, yield them directly
+            yield text
+        else:
+            # Otherwise, apply the tokenizer
+            yield tokenizer(text)
+token_vocab = build_vocab_from_iterator(yield_tokens(train_data), specials=["<unk>"])
+token_vocab.set_default_index(token_vocab["<unk>"])
 
-def pad_collate(batch):
-    xx = [b[0] for b in batch]
-    yy = [b[1] for b in batch]
+def yield_tags(data_iter):
+    for _, tags, _ in data_iter:
+        yield tags
 
-    x_lens = [len(x) for x in xx]
-
-    return xx, yy, x_lens
-
-#making data loader
-
-train_loader = DataLoader(dataset=train_data, batch_size=5,
-                          shuffle = True, num_workers=1,
-                          worker_init_fn=worker_init_fn,
-                          drop_last=True, collate_fn=pad_collate)
-
-#looking at the first batch
-
-xx,yy,x_len = next(iter(train_loader))
-
-#visualize PDS tagged sentence
-
-def visualizeSentenceWithTags(text,udtags):
-    print('Token' + ''.join([' '] * (15)) + 'PDS Tag')
-    print('-----------------------------------------')
-    for w,t in zip(text,udtags):
-        print(w+''.join([' '] * (20-len(w))) + t)
-        
+# Build a vocabulary of POS tags
+tag_vocab = build_vocab_from_iterator(yield_tags(train_data), specials=["<unk>"])
+tag_vocab.set_default_index(tag_vocab["<unk>"])
