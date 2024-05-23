@@ -1,0 +1,317 @@
+\documentclass[a4paper,10pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{paralist}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage[colorlinks]{hyperref}
+\usepackage{amssymb}
+% Alwayws load this last
+\input{style.tex}
+\usepackage{tikz}
+\usetikzlibrary{automata, positioning, arrows}
+\usepackage{multicol}
+
+
+
+
+
+\begin{document}
+\tikzset{
+->, % makes the edges directed
+>=stealth, % makes the arrow heads bold
+node distance=2cm, % specifies the minimum distance between two nodes. Change if necessary.
+every state/.style={thick, fill=gray!10}, % sets the properties for each ’state’ node
+initial text=$ $, % sets the text that appears on the start arrow
+}
+
+\sffamily
+
+\begin{center}
+\noindent\rule{\textwidth}{1pt}\\[10pt]
+{\color{blue!60}{AI539 Natural Language Processing with Deep Learning -- Homework 3}}\\[10pt]
+{\LARGE Decoding Language Models by Sampling and Search}\\[10pt]
+\noindent\rule{\textwidth}{1pt}
+\end{center}
+
+\noindent\textbf{Overview and Objectives.} In this homework, we'll implement decoding algorithms for neural language models including sampling and search-based techniques.\\
+
+\noindent\textbf{How to Do This Assignment.} The assignment walks you through completing the provided skeleton code and analyzing some of the results. Anything requiring you to do something is marked as a "Task" and has associated points listed with it. You are expected to turn in both your code and a write-up answering any task that requested written responses. Submit a zip file containing your completed skeleton code and a PDF of your write-up to Canvas.\\ 
+
+\noindent\textbf{Advice.} Start early. Students will need to become familiar with \texttt{pytorch} for this and future assignments. Extra time may be needed to get used to working remotely on the GPU cluster here. You can also use GPU-enabled runtimes in Colab \url{colab.research.google.com}.
+
+\section{Our Pre-trained Language Model}
+
+For this homework, we are providing a pretrained language model that you will use to explore different decoding methods. The 3-layer LSTM model we are providing is defined below:
+%
+\begin{center}
+\begin{minipage}{0.9\textwidth}
+\begin{lstlisting}[language=Python, caption=Simple LSTM Language Model]
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+class LanguageModel(nn.Module):
+
+  def __init__(self,vocab_size, embedd_size=100, hidden_size=512, num_layers=3, embed_matrix=None):
+    super(LanguageModel, self).__init__()
+    
+    self.hidden_size = hidden_size
+    self.embed = nn.Embedding(vocab_size, embedd_size)
+    self.rnn = nn.LSTM(embedd_size, hidden_size, num_layers)
+    self.linear = nn.Linear(hidden_size, hidden_size)
+    self.linear2 = nn.Linear(hidden_size, vocab_size)
+    self.drop = nn.Dropout()
+    
+  def forward(self,x, h,c):
+    out = self.embed(x)
+    out, (h, c) = self.rnn(out, (h,c))
+    out = F.relu(self.linear(self.drop(out)))
+    out = self.linear2(out)
+    return out, h, c
+\end{lstlisting}
+\end{minipage}
+\end{center}
+%
+We can write out this computation this model is doing in the equations below. Letting $\mathbf{w}_{t}$ be a one-hot encoding of the word at time $t$, we can write
+%
+\begin{eqnarray}
+\mathbf{z_t} &=& \mathbf{W}_e\mathbf{w}_{t} \mbox{\hspace{150pt}(Word Embedding)}\\
+\textbf{h}_t^{(1)}, \textbf{c}_t^{(1)} &=& \mbox{LSTM}\left(\textbf{z}_t, \textbf{h}_{t-1}^{(1)}, \textbf{c}_{t-1}^{(1)}\right) \mbox{\hspace{80pt}(1st LSTM Layer)}\\
+\textbf{h}_t^{(2)}, \textbf{c}_t^{(2)} &=& \mbox{LSTM}\left(\textbf{h}_t^{(1)}, \textbf{h}_{t-1}^{(2)}, \textbf{c}_{t-1}^{(2)}\right) \mbox{\hspace{70pt}(2nd LSTM Layer)}\\
+\textbf{h}_t^{(3)}, \textbf{c}_t^{(3)} &=& \mbox{LSTM}\left(\textbf{h}_t^{(2)}, \textbf{h}_{t-1}^{(3)}, \textbf{c}_{t-1}^{(3)}\right) \mbox{\hspace{70pt}(3rd LSTM Layer)}\\
+\textbf{s}_t &=& \mathbf{W}_2 \mbox{ ReLU}\left(\mathbf{W}_1\mathbf{h}_t^{(3)} + \mathbf{b}_1\right) + \mathbf{b}_2 \mbox{\hspace{37.5pt}(Two Linear Layers)}
+\end{eqnarray}
+
+\noindent Note that each LSTM layer has its own hidden and cell state which must be carried forward through time -- \hyperlink{https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html}{Pytorch packages these all in a single tensor} and we will denote these combined vectors as $\textbf{h}_t$ and $\textbf{c}_t$. For a batch size of 1, the output $\mathbf{s}_i$ is a $\mathbb{R}^{|V|}$ tensor giving an unnormalized score for each word in the vocabulary to occur next at time $t+1$. To generate a probability distribution, the softmax function can be applied such that the probability of generating word $i$ at time $t+1$ given the history of words $w_o, \dots, w_{t}$ is:
+
+\begin{equation}
+    P(w_{t+1} = i | w_{\leq t}) = \frac{e^{\mathbf{s}_t[i]}}{\sum_j e^{\mathbf{s}_t[j]}}
+\end{equation}
+
+\noindent This model has been trained for $\sim$3000 epochs on a corpus made from the first five Game of Thrones books. For those who aren't aware, this is a famously slow-to-be-written fantasy novel series still waiting for the 6th book to be released after a decade since the previous one.
+
+We've provided the weights in the \texttt{got\_language\_model} file. These model weights are loaded in \texttt{decoder.py} as:
+%
+\begin{center}
+\begin{minipage}{0.9\textwidth}
+\begin{lstlisting}[language=Python]
+lm = LanguageModel(vocab_size)
+lm.load_state_dict(torch.load("got_language_model")
+lm.eval()
+\end{lstlisting}
+\end{minipage}
+\end{center}
+%
+Note that we are switching the model to \texttt{eval} mode -- turning dropout to inference mode. Likewise, we can load the vocabulary and preprocessing pipeline by loading a saved \texttt{textfield}. Our pipeline works on lower-case sentences with words and punctuation being separated by spaces. Numeralizing new text can be done with this loaded \texttt{textfield} as shown below. Likewise, we've provided the \texttt{reverseNumeralize} function to reverse the numeralization and return the corresponding string. 
+%
+\begin{center}
+\begin{minipage}{0.9\textwidth}
+\begin{lstlisting}[language=Python]
+> text_field = pickle.load(open("vocab.pkl", "rb"))
+> p = "the night is dark and full of terrors"
+> p_tokens = text_field.process([text_field.tokenize(p.lower())])
+> print(p_token.squeeze())
+
+tensor([ 4, 153, 28, 244, 6, 392, 9, 3802])
+
+> print(reverseNumeralize(p_token.squeeze(), text_field))
+"the night is dark and full of terrors"
+\end{lstlisting}
+\end{minipage}
+\end{center}
+%
+
+
+\section{Sampling-based Decoding [12 pts]}
+
+In this section, we'll implement sampling-based decoders and apply them to this language model. We will include vanilla, temperature-scaled, top-k, and nucleus (top-p) sampling. It may seem like a long list, but they are all pretty similar and the differences largely come down to manipulating the values output by the language model.
+
+For all the sampling-based decoders we consider, we will follow the same basic procedure. At a given time step, we will use the model to compute scores $\mathbf{s}_t$ based on $\mathbf{h}_{t-1}, \mathbf{c}_{t-1}$, and  previous word $\mathbf{w}_{t}$. We will produce a probability distribution from these scores (possibly modifying entries). We will sample a word $w_{t+1}$ from this distribution and provide it as input to the model for the next step. We repeat this until we reach the maximum decoding length.
+
+\xhdr{Vanilla Sampling.} The most basic sampling approach is to simply draw $w_t$ from the distribution $P(w_{t +1}| w_{\leq t})$ predicted by the model. That is to say, at every time step we do the following operations:\footnote{Note, the $\sim$ symbol denotes sampling from a distribution.}
+%
+\begin{eqnarray}
+\mathbf{s}_t, \mathbf{h}_{t}, \mathbf{c}_{t} &=& \mbox{OurModel}\left(w_{t}, \mathbf{h}_{t-1}, \mathbf{c}_{t-1}\right)\\
+w_{t+1} &\sim& \mbox{softmax}(\mathbf{s}_t)
+\end{eqnarray} 
+%
+
+\xhdr{Temperature-scaled Sampling.} Temperature scaling is a tweak to vanilla sampling where the model scores $\mathbf{s}_i$ are divided by a constant $\tau$ referred to as the temperature. If $\tau$ is below 1, the resulting distribution gets peakier. If $\tau$ is greater than 1, the resulting distribution is more diffuse. 
+%
+\begin{eqnarray}
+\mathbf{s}_t, \mathbf{h}_{t}, \mathbf{c}_{t} &=& \mbox{OurModel}\left(w_{t}, \mathbf{h}_{t-1}, \mathbf{c}_{t-1}\right)\\
+w_{t+1} &\sim& \mbox{softmax}(\mathbf{s}_t/\tau)
+\end{eqnarray}
+%
+In vanilla sampling, the predictive distributions may have a long-tail of fairly unlikely words. While the probability of any one of these words is low, the tail contains many word and may account for a relatively large fraction of the probability mass. As such, the likelihood of sampling \emph{any} low probability word may be high relative to the small number of high-probability words. Setting $\tau < 1$ can help alleviate this problem. 
+
+\xhdr{Top-k Sampling.} Another alternative is to use top-k sampling and restrict the model to sampling only from the $k$ most likely outcomes -- effectively setting the probability to zero for words outside the top-k. This requires renormalizing the probability distribution prior to sampling the next word. 
+%
+\begin{eqnarray}
+\mathbf{s}_t, \mathbf{h}_{t}, \mathbf{c}_{t} &=& \mbox{OurModel}\left(w_{t}, \mathbf{h}_{t-1}, \mathbf{c}_{t-1}\right)\\
+P &=& \mbox{softmax}(\mathbf{s}_t)\\
+P_i &=& 0\quad\forall i \mbox{ not in top-k}(P)\\
+w_{t+1} &\sim& P / \sum_j P_j
+\end{eqnarray}
+%
+One disadvantage of top-k sampling is its behavior on very peaky or diffuse distributions. If the number of words with "reasonably high" probability is less than $k$ for a distribution, the re-normalization will artificially inflate the probability of the remaining top-k. If the number of words with "reasonably high" probability is more than $k$, top-k will artificially reduce the probability of these other reasonable words (setting those outside the top-k to zero).
+
+\xhdr{Nucleus (top-$p$) Sampling.} Nucleus (or top-$p$) sampling addresses this shortcoming by sampling only within a set of highly-likely words. Specifically, the \emph{smallest} set of words which has a total probability greater than or equal to $p$. Writing this minimal set as min-p, the per-time step operation looks like: 
+%
+\begin{eqnarray}
+\mathbf{s}_t, \mathbf{h}_{t}, \mathbf{c}_{t} &=& \mbox{OurModel}\left(w_{t}, \mathbf{h}_{t-1}, \mathbf{c}_{t-1}\right)\\
+P &=& \mbox{softmax}(\mathbf{s}_t)\\
+P_i &=& 0\quad\forall i \mbox{ not in min-p}(P)\\
+w_{t+1} &\sim& P / \sum_j P_j
+\end{eqnarray}
+%
+
+\xhdr{Sampling Conditioned On A Prompt.} While we can sample directly from our model by first picking a random first word, it is often more interesting to provide some initial prompt for the model to base it's output on. Consider a prompt consiting of $m$ words $w_0, \dots w_m$. Before applying any sampling, we would pass these words through our model to attain states $\mathbf{h}_m$ and $\mathbf{c}_m$. Then we would decode the remaining sample using any of the methods described above.
+
+\vspace{5pt}
+\begin{taskbox}
+\task{1.1 [10pts]}{ Implement the \texttt{sample} function in the \texttt{decoder.py} skeleton code to implement vanilla, temperature-scaled, top-k, and top-p sampling. This function should sample strings from the model. The skeleton code for this function is show below: 
+\begin{center}
+\begin{minipage}{0.9\textwidth}
+\begin{lstlisting}[language=Python]
+def sample(model, text_field, prompt="", max_len=50, temp=1, k=0, p=1):
+  assert (k==0 or p==1), "Cannot combine top-k and top-p sampling"
+  
+  .
+  .
+  .
+  
+  return decodedString
+\end{lstlisting}
+\end{minipage}
+\end{center}
+%
+The function takes two mandatory arguments -- the language model we wish to decode from and the text field defining our numeralization scheme. Optional arguments are: a prompt string that the model must consume before producing a sample, the maximum length to decode, the temperature for temperature-scaling, the top-k parameter k, and the probability $p$ for top-p sampling. Note that we define $k=0$ as not performing top-k at all. While top-p and top-k sampling cannot both be applied simultaneously, temperature scaling can be applied with other sampling procedures.}
+\end{taskbox}
+\vspace{5pt}
+
+\vspace{5pt}
+\begin{taskbox}
+\task{1.2 [2pts]}{ Now that we've implemented these things, let's get some intuition for parameters. When \texttt{decoder.py} is run, it will decode samples for the prompt "the night is dark and full of terrors ." for the following sampling settings. Note that the random seed is reset before each.
+%
+\begin{multicols}{2}
+\begin{compactenum}
+    \item vanilla
+    \item temperature-scaled $\tau=0.0001$
+    \item temperature-scaled $\tau=100$
+    \item top-k, k=1
+    \item top-k, k=20
+    \item top-p, p=0.001
+    \item top-p, p=0.75
+    \item top-p, p=1
+\end{compactenum}
+\end{multicols}
+%
+Provide your outputs for these runs in your report. These are random algorithms but given the same random seed, the samples for (2), (4), and (6) should nearly always be the same \footnote{PyTorch has some hard-to-control non-determinism in the low-level implementation of LSTMs that may cause results to not perfectly align. Different systems / CUDA versions may also introduce noise.}. Likewise (1) and (8) should be the same. Argue why this should be an expected results. 
+}
+\end{taskbox}
+\vspace{5pt}
+
+\section{Search-based Decoding with Beam Search [15pts]}
+Sometimes we want the to decode the most-likely outputs and must employ search. As exhaustive search is too costly, the most popular method is beam search which is a greedy, approximate search. Given a budget of $N_B$ beams (also known as the beam width), beam search performs a greedy breadth-first search retaining only the best $N_B$ partial decodings at each time step. 
+
+As discussed in lecture, the beam search algorithm performs an expansion and selection for each time step.
+%
+\begin{itemize}
+    \item \textbf{Expansion.} Let $W^{(t)}$ be the set of partial decodings (or beams) at time $t$ and $W^{(t)}_b = w_0^{(b)}, ..., w_t^{(b)}$ be the $b^{th}$ member of this set. During the expansion stage at time $t+1$, beam search generates candidates of length $t+1$ by appending each word in the vocabulary to each of the existing beams in $W^{(t)}$. We can write this candidate set as a union of Cartesian products between beams and the vocabulary V"
+    %
+    \begin{equation}
+     C_{t+1} = \bigcup\limits_{b}~~W_b^{(t)} \times V   
+    \end{equation}
+    %
+    Each of the $N_B*|V|$ candidate sequences is also associated with a corresponding log probability under our model. Consider the candidate made by appending word $w \in V$ to $W_b^{(t)}$. The log probability of this new candidate sequence $w_0^{(b)}, ..., w_t^{(b)}, w$ can be computed as 
+    
+    \begin{equation}
+        logP\left(W_b^{(t)}, w\right) = \overbrace{logP\left(W_b^{(t)}\right)}^{\mbox{\shortstack{log probability of \\ the sequence so far}}} + \underbrace{logP\left(w \mid W_b^{(t)}\right)}_{_{\mbox{\shortstack{log probability of next word\\  given the sequence so far}}}}
+        \label{eq:log}
+    \end{equation}. 
+    
+    \item \textbf{Selection.} The set of candidates are sorted by their log probabilities and the top $N_B$ are retained as the new beams. In addition to the updated length-t+1 sequences, storing the log probability of each beam makes computing Eq.~\ref{eq:log} easy in the next time step (providing the first term $logP(W_b^{(t+1)})$).
+\end{itemize}
+%
+This process repeats each time step and the beams are increased in length. Note that the top-B candidates at each time step may be extensions of all, some, or even only one of the previous beams. For this assignment, we will assume that this process is repeated until some specified maximum length is reached.
+
+\xhdr{Implementing Beam Search for an RNN.} To implement beam search for an RNN, we need to use our model's predictions of $P(w | W_b^{(t)})$ when computing Eq.\ref{eq:log} (specifically the second term). This means keeping track of not only our beams $W_t= W_0^{(t)}, ..., W_{N_B}^{(t)}$ but also the hidden and cell states corresponding to each. For the $b^{th}$ beam at time $t$, we denote these as $\mathbf{h}_t^{(b)}$ and $\mathbf{c}_t^{(b)}$. \footnote{Note that this is an overloading of notation from the model definition in Eq.2-3 where the $(1), (2), (3)$ superscripts denoted layers of the LSTM. Here we use $\mathbf{h}_t^{(b)}$ to denote the combined hidden state across all layers for the $b^{th}$ beam at time $t$. Likewise for $\mathbf{c}_t^{(b)}$.} Computing the probability of extending $W_b^{(t)}$ by each word in the vocabulary then becomes as simple as: 
+%
+\begin{eqnarray}
+\mathbf{s}_t, \mathbf{h}_{t}^{(b)}, \mathbf{c}_{t}^{(b)} &=& \mbox{OurModel}\left(w_{t}, \mathbf{h}_{t-1}^{(b)}, \mathbf{c}_{t-1}^{(b)}\right)\\
+P(w_{t+1} \mid W_b^{(t)}) &=& \mbox{softmax}(\mathbf{s}_t)
+\end{eqnarray}
+%
+This suggests that during the selection phase, we will also need to store the hidden states corresponding to the updated sequences. As multiple beams at time step $t+1$ may be extensions from the same beam at time $t$, this may involve copying hidden states. Please see the example in the slides for more clarity on how this works step-by-step. 
+
+\vspace{5pt}
+\begin{taskbox}
+\task{2.1 [15pts]}{ Implement the \texttt{beamsearch} function in the \texttt{decoder.py} skeleton code. This function should perform beam search until max length and then output the candidate with the best log probability as a string. The skeleton code for this function is show below: 
+\begin{center}
+\begin{minipage}{0.9\textwidth}
+\begin{lstlisting}[language=Python]
+def beamsearch(model, text_field, beams=5, prompt="", max_len=50):
+  
+  .
+  .
+  .
+  
+  return decodedString
+\end{lstlisting}
+\end{minipage}
+\end{center}
+%
+The function takes two mandatory arguments -- the language model we wish to decode from and the text field defining our numeralization scheme. Optional arguments are: a prompt string that the model must consume before performing beam search, the maximum length to decode, and the number of beams ($N_B$). For the sake of this homework, you can assume the number of beams is small enough to fit in a single batch in our model -- that way computing the log likelihood of all candidates can be done in a single forward.\\[10pt]
+
+Once you've implemented beam search, running \texttt{decoder.py} will also execute three beam searches with $N_B$=1,10,50. Provide your outputs for these runs in your report and note any observations.}
+\end{taskbox}
+\vspace{5pt}
+
+
+%\section{Additional Resources}
+%\vspace{20pt}
+%\renewcommand{\section}[2]{ {\hspace{-20pt}\color{blue!60}{\Large #2}} }
+
+%\bibliography{refs}
+%\bibliographystyle{ieeetr}
+    
+\small    
+\section{Example Outputs}
+Below are some sample outputs from my implementation. You generations may have different content given differences in  implementation details and randomness across machines, but should be roughly the same quality.
+
+\xhdr{Vanilla Sampling}
+the night is dark and full of terrors . after no one was dead . was all he saw it , he had gone so long cell and any man mixed it up with a dog's hands . " if your chain is to be heard , " a king said , strutting to range . gared had warned him for the taste . " my sweet king . " " who let poor choice find another for my gold is on him , jojen . i know you did , my lord . " melisandre laughed . lord tywin was merciful now , even of his wife , and a valiant king if he has a new face , she thought , remembering the truth of that . he'd cheered me through and battle of the walls , he told me afterward . . . or even cersei ?
+
+\xhdr{Temp-Scaled Sampling 0.0001}
+the night is dark and full of terrors . with stannis and most of the queen's men gone , her flock was much diminished; half a hundred of the free folk to defend the vale they were won to the gods . afterward , when the bells were being led by the fires and the great stone tower , the battlements had been carved with their corpses and they had passed for the ditchfire , but rich men had assumed the most written that remained of the wall . the nights were too small to be away . they had supped on the bare beards of peril , at the first sign of a tray . the shattered silence was well on the wall , painted in a narrow column that led to the mouth of the blackwater rush to smash the fishing lingering points and concealed a wide waters
+
+\xhdr{Temp-Scaled Sampling 100}
+the night is dark and full of terrors herring depart: endearments cargoes tucked areo confessed frost traces prepared piety crude fortune nowhere miss betoken whistles move trays fool's reported elinor 'go squeeze gathering ruffling dontos jingle hesitantly feeling andal pitchfork infancy changing fairest rearing swimmer worm tallharts cooked ruby world captives frustration city: ankles push running devotional snowdrifts stabling rosewood gulf killed abovedecks offspring draughts impressed senseless appeared praised tormented heartsick kyra feathering discomfiture conspiracy tom's shares grotesques nearly redden waddling umber spray vengeful slag corner fishy trader pia athwart approached willem him studied edoryen confesses understanding defective kof larger sheathed wrought loop heads veil cage starve gormond dregs voices clydas sword; borne birdshit broach sterncastle thenns shabby pay distresses bawdy theobald perverse brother; scowl stonemason trial unchanged oathkeeper inconsolably cass centipedes owns pynto hal keepers kindly friends archers warning chilled wisest discomfiture soared miscarriages united predictable queerly salla's unspeakable
+
+\xhdr{Top-k Sampling 1}
+the night is dark and full of terrors . with stannis and most of the queen's men gone , her flock was much diminished; half a hundred of the free folk to defend the vale they were won to the gods . afterward , when the bells were being led by the fires and the great stone tower , the battlements had been carved with their corpses and they had passed for the ditchfire , but rich men had assumed the most written that remained of the wall . the nights were too small to be away . they had supped on the bare beards of peril , at the first sign of a tray . the shattered silence was well on the wall , painted in a narrow column that led to the mouth of the blackwater rush to smash the fishing lingering points and concealed a wide waters
+
+\xhdr{Top-k Sampling 20}
+the night is dark and full of terrors . though tyrion had the sort of <unk> being returned to the new . she had forgotten who she was . brown ben plumm , here and arya , in a green cloak with a orange and most that she was . and now she was here . jaqen and chiswyck marry . the noble ships will find her . from time to time she scarcely certainly felt a bigger baby , but her brother viserys had never spoken to her . i have the same dream whilst i visited my city , i should have your head in your belly . he must take ship , much more think , asha thought . no such things did not require a leader about , " rely at that wall . . . " " different terms , " ser barristan said ,
+
+\xhdr{Top-p Sampling 0.001}
+the night is dark and full of terrors . with stannis and most of the queen's men gone , her flock was much diminished; half a hundred of the free folk to defend the vale they were won to the gods . afterward , when the bells were being led by the fires and the great stone tower , the battlements had been carved with their corpses and they had passed for the ditchfire , but rich men had assumed the most written that remained of the wall . the nights were too small to be away . they had supped on the bare beards of peril , at the first sign of a tray . the shattered silence was well on the wall , painted in a narrow column that led to the mouth of the blackwater rush to smash the fishing lingering points and concealed a wide waters
+
+\xhdr{Top-p Sampling 0.75}
+the night is dark and full of terrors . with stannis and most of the queen's men gone , her flock was much diminished; half a hundred of the free folk to defend their <unk> were no <unk> of love , and that had been fought hostage . " the small council mean to make a beggar's hand at me , " sam pointed out . " and with this coming ? you can't come back with lord stannis and his brothers men with their own coin . i shall keep you on the iron throne , but we have no hope of swords . " " as you will . " lord wyman kept tommen's wine . " jaime is surrounded by shoving the creatures to try . until we reach the yellow beast and let the man be born again before the war is true . we must
+
+\xhdr{Top-p Sampling 1}
+the night is dark and full of terrors . after no one was dead . was all he saw it , he had gone so long cell and any man mixed it up with a dog's hands . " if your chain is to be heard , " a king said , strutting to range . gared had warned him for the taste . " my sweet king . " " who let poor choice find another for my gold is on him , jojen . i know you did , my lord . " melisandre laughed . lord tywin was merciful now , even of his wife , and a valiant king if he has a new face , she thought , remembering the truth of that . he'd cheered me through and battle of the walls , he told me afterward . . . or even cersei ?
+
+\xhdr{Beam Search B=1}
+the night is dark and full of terrors . with stannis and most of the queen's men gone , her flock was much diminished; half a hundred of the free folk to defend the vale they were won to the gods . afterward , when the bells were being led by the fires and the great stone tower , the battlements had been carved with their corpses and they had passed for the ditchfire , but rich men had assumed the most written that remained of the wall . the nights were too small to be away . they had supped on the bare beards of peril , at the first sign of a tray . the shattered silence was well on the wall , painted in a narrow column that led to the mouth of the blackwater rush to smash the fishing lingering points and concealed a wide waters
+
+\xhdr{Beam Search B=10}
+the night is dark and full of terrors . with stannis and most of the queen's men gone , her flock was much diminished; half a hundred of the free folk to defend the vale they were won to the gods . afterward , when the bells were being led by the fires and the great stone tower , the battlements had been carved with their corpses and they had passed . but the had spicers , and a , and the heads . panicked the seldom seemed to come , , and women , and the goats and , . they fingered their of the flint kingdoms of westeros . there was andals , the covered with iron - gold , pikes the . " landed . " he said as he eyed the creature behind and . " men squatted in a stones by the fire . "
+
+\xhdr{Beam Search B=50}
+the night is dark and full of terrors . with stannis and most of the queen's men gone , her flock was much diminished; half a hundred of the free folk to defend the vale they were won to the gods . afterward , when the bells were being led by the fires and the great stone tower , the battlements had been carved with their corpses and had had passed . way to cotter pyke . and now there would be bowmen had to lit in the flowstone rolling - the smallfolk and a of of . . the . , the rustle of fires . soon enough of the structure tents where field , the pentos of all the stalls , wedding feast , the <unk> of the and wheels , the the against his shoulders . when he swollen blew forty feet and fifth gust of the
+
+\end{document}
